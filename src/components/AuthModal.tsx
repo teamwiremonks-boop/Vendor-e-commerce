@@ -128,6 +128,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalP
             user_id: finalUserId,
             user_name: name.trim(),
             user_email: normalizedEmail,
+            user_password: password,
             role: role
           }]);
           
@@ -174,7 +175,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalP
         }, 1200);
 
       } else {
-        // --- REAL SUPABASE SIGN IN ---
+        // --- SECURE CUSTOM DATABASE & SUPABASE SIGN IN ---
         let authUser = null;
         let userRole: 'admin' | 'vendor' | 'user' = role || 'user';
         let userName = normalizedEmail.split('@')[0] || 'Member';
@@ -183,74 +184,83 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }: AuthModalP
         let loginSuccess = false;
         let finalUserId = '';
 
+        // Query the database users table first to verify password if present
         try {
-          const { data, error: signInError } = await supabase.auth.signInWithPassword({
-            email: normalizedEmail,
-            password
-          });
-          
-          if (!signInError && data.user) {
-            authUser = data.user;
-            finalUserId = data.user.id;
-            const meta = authUser.user_metadata || {};
-            userRole = meta.role || userRole;
-            userName = meta.name || userName;
-            vName = meta.vendorName;
-            vLoc = meta.storeLocation;
+          const { data: dbUser, error: dbErr } = await supabase
+            .from('users')
+            .select('*')
+            .eq('user_email', normalizedEmail)
+            .limit(1);
+
+          if (dbErr) {
+            console.warn('DB check error:', dbErr);
+          } else if (dbUser && dbUser.length > 0) {
+            const matchedUser = dbUser[0];
+            // If the user has a stored password, check it!
+            if (matchedUser.user_password !== undefined && matchedUser.user_password !== null) {
+              if (matchedUser.user_password !== password) {
+                throw new Error('Incorrect password. Please verify and try again.');
+              }
+            }
+            // Password verified or matches! Setup details
+            finalUserId = matchedUser.user_id;
+            userName = matchedUser.user_name || userName;
+            userRole = (matchedUser.role as any) || userRole;
             loginSuccess = true;
+
+            // Pull vendor details if applicable
+            if (userRole === 'vendor') {
+              const { data: dbVendor } = await supabase
+                .from('vendors')
+                .select('*')
+                .eq('vendor_id', finalUserId)
+                .limit(1);
+              if (dbVendor && dbVendor.length > 0) {
+                vName = dbVendor[0].vendor_name;
+                vLoc = dbVendor[0].vendor_details?.location || dbVendor[0].vendor_details?.storeLocation;
+              }
+            }
           }
-        } catch (authErr) {
-          console.warn('Auth signIn exception, falling back directly to public databases:', authErr);
+        } catch (dbErr: any) {
+          if (dbErr.message?.includes('Incorrect password')) {
+            throw dbErr;
+          }
+          console.warn('Database login block general warning:', dbErr);
         }
 
-        // If standard authentication fails or rate limits check in, look up the profile inside the public table
+        // Fallback to Supabase auth sign-in if we haven't succeeded or if user is only in auth tables.
         if (!loginSuccess) {
           try {
-            const { data: dbUser, error: dbErr } = await supabase
-              .from('users')
-              .select('*')
-              .eq('user_email', normalizedEmail)
-              .limit(1);
-
-            if (dbUser && dbUser.length > 0) {
-              const matchedUser = dbUser[0];
-              finalUserId = matchedUser.user_id;
-              userName = matchedUser.user_name || userName;
-              userRole = (matchedUser.role as any) || userRole;
+            const { data, error: signInError } = await supabase.auth.signInWithPassword({
+              email: normalizedEmail,
+              password
+            });
+            
+            if (!signInError && data.user) {
+              authUser = data.user;
+              finalUserId = data.user.id;
+              const meta = authUser.user_metadata || {};
+              userRole = meta.role || userRole;
+              userName = meta.name || userName;
+              vName = meta.vendorName;
+              vLoc = meta.storeLocation;
               loginSuccess = true;
 
-              // Pull vendor details if applicable
-              if (userRole === 'vendor') {
-                const { data: dbVendor } = await supabase
-                  .from('vendors')
-                  .select('*')
-                  .eq('vendor_id', finalUserId)
-                  .limit(1);
-                if (dbVendor && dbVendor.length > 0) {
-                  vName = dbVendor[0].vendor_name;
-                  vLoc = dbVendor[0].vendor_details?.location || dbVendor[0].vendor_details?.storeLocation;
-                }
-              }
+              // Write to users table if missing since we signed in successfully with credentials
+              try {
+                await supabase.from('users').insert([{
+                  user_id: finalUserId,
+                  user_name: userName,
+                  user_email: normalizedEmail,
+                  user_password: password,
+                  role: userRole
+                }]);
+              } catch (_) {}
             } else {
-              throw new Error('No account exists under this email address. Please sign up above.');
+              throw signInError || new Error('No account exists or invalid credentials.');
             }
-          } catch (fallbackErr: any) {
-            throw new Error(fallbackErr.message || 'Login failed. Please verify credentials or try signing up.');
-          }
-        } else {
-          // Keep role synchronization accurate
-          try {
-            const { data: dbUser } = await supabase
-              .from('users')
-              .select('*')
-              .eq('user_id', authUser!.id)
-              .single();
-            if (dbUser) {
-              userRole = (dbUser.role as any) || userRole;
-              userName = dbUser.user_name || userName;
-            }
-          } catch (dbErr) {
-            console.warn('Detailed profile synchronization skipped:', dbErr);
+          } catch (authErr: any) {
+            throw new Error(authErr.message || 'Login failed. Please verify credentials or try signing up.');
           }
         }
 

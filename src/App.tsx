@@ -44,6 +44,11 @@ interface PlacedOrder {
 }
 
 const mapDbProductToB2BProduct = (db: any): B2BProduct => {
+  // If we fetched the normalized format (has product_variants, etc.)
+  const variant = db.product_variants && db.product_variants.length > 0 ? db.product_variants[0] : null;
+  const inv = db.inventory && db.inventory.length > 0 ? db.inventory[0] : null;
+  const storeObj = db.stores && db.stores.length > 0 ? db.stores[0] : null;
+
   return {
     id: db.product_id || db.id || `prod-${Math.random().toString(36).substr(2, 9)}`,
     vendorId: db.vendor_id || db.vendorId || 'vendor-generic',
@@ -51,21 +56,41 @@ const mapDbProductToB2BProduct = (db: any): B2BProduct => {
     name: db.product_name || db.name || 'Premium Tile Stock Lot',
     description: db.product_description || db.description || 'Vitrified porcelain with a highdensity finish.',
     category: db.category || 'Porcelain',
-    finish: db.finish || 'Polished',
-    dimensions: db.dimensions || '600mm x 600mm',
-    thickness: db.thickness || '9.5mm',
-    originalPrice: Number(db.original_price || db.originalPrice || 85.00),
-    clearancePrice: Number(db.clearance_price || db.clearancePrice || 29.90),
-    stockSqm: Number(db.stock_sqm || db.stockSqm || db.stock || 250),
+    
+    // Derived or normalized relations
+    finish: db.finish || (variant ? variant.finish : 'Polished'),
+    dimensions: db.dimensions || (variant ? variant.dimensions : '600mm x 600mm'),
+    thickness: db.thickness || (variant ? variant.thickness : '9.5mm'),
+    originalPrice: Number(db.original_price || db.originalPrice || (variant ? Number(variant.price || variant.clearance_price) * 2 : 85.00)),
+    clearancePrice: Number(db.clearance_price || db.clearancePrice || (variant ? Number(variant.price || variant.clearance_price) : 29.90)),
+    stockSqm: Number(db.stock_sqm || db.stockSqm || db.stock || (inv ? Number(inv.quantity || inv.stock_sqm) : 250)),
     moq: Number(db.moq || 40),
-    storeName: db.store_name || db.storeName || 'Distribution Logistics',
-    storeLocation: db.store_location || db.storeLocation || 'Central Logistics Depot',
+    storeName: db.store_name || db.storeName || (storeObj ? storeObj.store_name : 'Distribution Logistics'),
+    storeLocation: db.store_location || db.storeLocation || (storeObj ? storeObj.store_location : 'Central Logistics Depot'),
+    
     rating: Number(db.rating || 4.7),
     grade: db.grade || 'Premium (Grade A+)',
     image: db.image || db.image_url || 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=600&q=80',
-    skus: db.skus || db.sku || `SKU-TILE-${Math.random().toString(36).substr(2, 5).toUpperCase()}`
+    skus: db.skus || db.sku || (variant ? variant.sku : null) || `SKU-TILE-${Math.random().toString(36).substr(2, 5).toUpperCase()}`
   };
 };
+
+function generateUUID(): string {
+  const hex = '0123456789abcdef';
+  let uuid = '';
+  for (let i = 0; i < 36; i++) {
+    if (i === 8 || i === 13 || i === 18 || i === 23) {
+      uuid += '-';
+    } else if (i === 14) {
+      uuid += '4'; // Version 4
+    } else if (i === 19) {
+      uuid += hex[(Math.random() * 4) | 8];
+    } else {
+      uuid += hex[(Math.random() * 16) | 0];
+    }
+  }
+  return uuid;
+}
 
 export default function App() {
   // Session Handling State
@@ -191,8 +216,27 @@ export default function App() {
           setDbDiagnosticMessage(checkError.message || JSON.stringify(checkError));
         } else {
           setDbConnectionStatus('connected');
-          // Fully load products from database
-          const { data: dbProducts } = await supabase.from('products').select('*');
+          // Fully load products from database, with optional joins for the normalized multi-table database
+          let dbProducts = null;
+          try {
+            const { data: nestedData, error: nestedError } = await supabase.from('products').select(`
+              *,
+              product_variants (*),
+              inventory (*),
+              stores (*)
+            `);
+            if (!nestedError && nestedData) {
+              dbProducts = nestedData;
+            }
+          } catch (nestedEx) {
+            console.warn('Could not select from nested product relations, falling back to flat table format:', nestedEx);
+          }
+
+          if (!dbProducts) {
+            const { data: simpleData } = await supabase.from('products').select('*');
+            dbProducts = simpleData;
+          }
+
           if (dbProducts && dbProducts.length > 0) {
             const mapped = dbProducts.map(mapDbProductToB2BProduct);
             setProducts(mapped);
@@ -307,7 +351,7 @@ export default function App() {
     if (!newProdName || !newProdClearance || !newProdStock || !newProdMoq) return;
 
     try {
-      const uniqueId = `prod-${Math.random().toString(36).substr(2, 9)}`;
+      const uniqueId = generateUUID();
       const skuVal = newProdSku.trim() || `SKU-TILE-${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
 
       const brand = currentUser?.vendorName || currentUser?.name || 'Elite Tiles';
@@ -339,41 +383,79 @@ export default function App() {
       // Real insert in Supabase database tables if online, failing silently for sandbox state reactivity
       if (isSupabaseConfigured) {
         try {
-          // Add product
-          const { data: prodData } = await supabase.from('products').insert([{
+          const vendorUuid = (currentUser?.id && currentUser.id.includes('-')) 
+            ? currentUser.id 
+            : '00000000-0000-4000-yxxx-000000000000'.replace(/[y]/g, 'a');
+
+          // Ensure vendor exists in vendors table to satisfy Referential Integrity
+          try {
+            await supabase.from('vendors').insert([{
+              vendor_id: vendorUuid,
+              vendor_name: brand,
+              vendor_details: { location: newProdStoreLoc.trim() || 'Central Showroom Yard' },
+              status: 'active'
+            }]);
+          } catch (_) {}
+
+          // Ensure store exists in stores table to satisfy stores references
+          const storeId = generateUUID();
+          const { error: storeErr } = await supabase.from('stores').insert([{
+            store_id: storeId,
+            vendor_id: vendorUuid,
+            store_name: newProdStoreName.trim() || 'Central Logistics Depot',
+            store_location: newProdStoreLoc.trim() || 'Central Showroom Yard'
+          }]);
+
+          if (storeErr) {
+            console.warn('Could not insert showroom into stores table:', storeErr);
+          }
+
+          // A. Add product (Only valid columns as specified in products schema!)
+          const { error: prodErr } = await supabase.from('products').insert([{
             product_id: uniqueId,
-            id: uniqueId,
-            vendor_id: currentUser?.id || 'vendor-generic',
-            vendorId: currentUser?.id || 'vendor-generic',
-            vendor_name: brand,
-            vendorName: brand,
+            vendor_id: vendorUuid,
             product_name: newProdName.trim(),
-            name: newProdName.trim(),
             product_description: newProdDesc.trim() || `${newProdCategory} premium tiles.`,
-            description: newProdDesc.trim() || `${newProdCategory} premium tiles.`,
-            category: newProdCategory,
-            finish: newProdFinish,
-            dimensions: newProdDims.trim(),
-            thickness: newProdThick.trim(),
-            original_price: parsedOriginal,
-            originalPrice: parsedOriginal,
-            clearance_price: parsedClearance,
-            clearancePrice: parsedClearance,
-            stock_sqm: parseInt(newProdStock) || 120,
-            stockSqm: parseInt(newProdStock) || 120,
-            moq: parseInt(newProdMoq) || 40,
-            store_name: newProdStoreName.trim(),
-            storeName: newProdStoreName.trim(),
-            store_location: newProdStoreLoc.trim() || 'Central Showroom Yard',
-            storeLocation: newProdStoreLoc.trim() || 'Central Showroom Yard',
-            rating: 4.8,
-            grade: newProdGrade,
-            image: newProdImage.trim(),
-            skus: skuVal,
+            category: newProdCategory
+          }]);
+
+          if (prodErr) {
+            console.error('Products insertion failed:', prodErr);
+            throw new Error(`Products table insertion failure: ${prodErr.message}`);
+          }
+
+          // B. Add to product_variants table
+          const variantId = generateUUID();
+          const { error: variantErr } = await supabase.from('product_variants').insert([{
+            variant_id: variantId,
+            product_id: uniqueId,
+            variant_name: `${newProdFinish} finish (${newProdDims} dimensions, ${newProdThick} thickness)`.trim(),
+            price: parsedClearance,
             sku: skuVal
           }]);
-        } catch (dbErr) {
-          console.warn('Supabase product record insert fallback:', dbErr);
+
+          if (variantErr) {
+            console.error('product_variants insertion failed:', variantErr);
+            throw new Error(`Table 'product_variants' insertion failure: ${variantErr.message}`);
+          }
+
+          // C. Add to inventory table
+          const inventoryId = generateUUID();
+          const { error: inventoryErr } = await supabase.from('inventory').insert([{
+            inventory_id: inventoryId,
+            store_id: storeId,
+            variant_id: variantId,
+            quantity: parseInt(newProdStock) || 120
+          }]);
+
+          if (inventoryErr) {
+            console.error('inventory insertion failed:', inventoryErr);
+            throw new Error(`Table 'inventory' insertion failure: ${inventoryErr.message}`);
+          }
+
+        } catch (dbErr: any) {
+          console.error('Detailed Supabase multi-table insertion error details:', dbErr);
+          throw dbErr;
         }
       }
 
@@ -388,7 +470,7 @@ export default function App() {
       setNewProdMoq('40');
       setNewProdSku('');
 
-      alert('Clearance lot has been registered and synced successfully!');
+      alert('Listing created successfully! Products, variants, inventory, and showrooms synced live.');
     } catch (err: any) {
       alert(err.message || 'Error occurred registering clearance item.');
     }
@@ -985,7 +1067,7 @@ export default function App() {
                   className="w-full py-2.5 mt-2 bg-slate-950 text-white text-xs font-bold rounded-xl hover:bg-slate-900 transition flex items-center justify-center gap-1.5"
                 >
                   <Plus className="w-4 h-4" />
-                  Publish Clearance Batch
+                  List Product
                 </button>
               </form>
             </section>
@@ -997,7 +1079,7 @@ export default function App() {
               <section className="bg-white p-6 border border-slate-200 rounded-2xl space-y-4">
                 <div className="border-b border-slate-100 pb-3 flex justify-between items-center">
                   <span className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
-                    <Package className="w-4 h-4 text-slate-500" /> Published Clearance Batches
+                    <Package className="w-4 h-4 text-slate-500" /> Listed Products
                   </span>
                   <span className="text-[10px] text-slate-400 font-semibold uppercase">Real-Time</span>
                 </div>
@@ -1278,10 +1360,10 @@ export default function App() {
                           {inCart ? (
                             <>
                               <Check className="w-3.5 h-3.5 text-emerald-600" />
-                              Allocated ({inCart.quantitySqm} Sqm)
+                              Added to Cart ({inCart.quantitySqm} Sqm)
                             </>
                           ) : (
-                            'Allocate Clearance Lot'
+                            'Add to Cart'
                           )}
                         </button>
                       </div>
@@ -1351,6 +1433,8 @@ export default function App() {
         onRemoveItem={handleRemoveFromCart}
         onCheckoutSuccess={handleCheckoutSuccess}
         userRole={currentUser?.role}
+        currentUser={currentUser}
+        onOpenAuth={() => setIsAuthOpen(true)}
       />
 
       {/* Dual portal dynamic authentication controls */}
