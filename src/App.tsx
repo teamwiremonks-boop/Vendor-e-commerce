@@ -71,6 +71,13 @@ export default function App() {
   // Session Handling State
   const [currentUser, setCurrentUser] = useState<CurrentUserProfile | null>(null);
 
+  // Active navigation tab for authorized roles (catalog vs administrative cockpit)
+  const [activeHubTab, setActiveHubTab] = useState<'catalog' | 'dashboard'>('catalog');
+
+  // Database Connection Status monitoring & diagnostic details
+  const [dbConnectionStatus, setDbConnectionStatus] = useState<'checking' | 'connected' | 'error' | 'offline'>('checking');
+  const [dbDiagnosticMessage, setDbDiagnosticMessage] = useState<string | null>(null);
+
   // Layout UI navigation & visibility drawers
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isCartOpen, setIsCartOpen] = useState(false);
@@ -173,17 +180,35 @@ export default function App() {
 
     // Also attempt real-time query of Supabase tables on boot (if credentials specified)
     const checkTables = async () => {
+      setDbConnectionStatus('checking');
+      setDbDiagnosticMessage(null);
       try {
-        const { data: dbProducts } = await supabase.from('products').select('*');
-        if (dbProducts && dbProducts.length > 0) {
-          const mapped = dbProducts.map(mapDbProductToB2BProduct);
-          setProducts(mapped);
+        // Query one record to check connectivity
+        const { data: checkData, error: checkError } = await supabase.from('products').select('*').limit(1);
+        if (checkError) {
+          console.warn('Supabase products check failed:', checkError);
+          setDbConnectionStatus('error');
+          setDbDiagnosticMessage(checkError.message || JSON.stringify(checkError));
+        } else {
+          setDbConnectionStatus('connected');
+          // Fully load products from database
+          const { data: dbProducts } = await supabase.from('products').select('*');
+          if (dbProducts && dbProducts.length > 0) {
+            const mapped = dbProducts.map(mapDbProductToB2BProduct);
+            setProducts(mapped);
+          }
         }
-      } catch (err) {
-        console.warn('Silent product load check:', err);
+      } catch (err: any) {
+        console.warn('Silent product load check general exception:', err);
+        setDbConnectionStatus('error');
+        setDbDiagnosticMessage(err.message || 'Unknown network error');
       }
     };
-    if (isSupabaseConfigured) checkTables();
+    if (isSupabaseConfigured) {
+      checkTables();
+    } else {
+      setDbConnectionStatus('offline');
+    }
 
     return () => subscription.unsubscribe();
   }, []);
@@ -425,7 +450,7 @@ export default function App() {
           </div>
 
           {/* Core Search bar input (only show for Client or guests browsing catalogs) */}
-          {(!currentUser || currentUser.role === 'user') && (
+          {(!currentUser || currentUser.role === 'user' || activeHubTab === 'catalog') && (
             <div className="relative w-full md:max-w-md flex items-center">
               <Search className="absolute left-3.5 w-4 h-4 text-slate-400" />
               <input 
@@ -442,10 +467,74 @@ export default function App() {
           {/* Desktop Right navigation controls */}
           <div className="hidden md:flex items-center gap-4">
             
-            {(!currentUser || currentUser.role === 'user') && (
+            {/* Supabase Database Connection Status Badge */}
+            <div 
+              title={dbDiagnosticMessage || 'Healthy Database Tunnel'}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border border-slate-200/60 rounded-xl text-[10px] font-semibold text-slate-500 shadow-sm transition hover:bg-slate-100 cursor-help"
+            >
+              <div className={`w-1.5 h-1.5 rounded-full ${
+                dbConnectionStatus === 'connected' 
+                  ? 'bg-emerald-500 animate-pulse' 
+                  : dbConnectionStatus === 'error' 
+                    ? 'bg-rose-500 animate-pulse' 
+                    : dbConnectionStatus === 'checking' 
+                      ? 'bg-amber-400' 
+                      : 'bg-slate-300'
+              }`} />
+              <span>{
+                dbConnectionStatus === 'connected' 
+                  ? 'Supabase Connected' 
+                  : dbConnectionStatus === 'error' 
+                    ? 'Database Offline' 
+                    : dbConnectionStatus === 'checking' 
+                      ? 'Connecting...' 
+                      : 'Cache Mode'
+              }</span>
+            </div>
+
+            {/* Dynamic Role Navigation Tabs */}
+            {currentUser && (currentUser.role === 'admin' || currentUser.role === 'vendor') && (
+              <div className="flex bg-slate-100 p-0.5 rounded-xl border border-slate-200/60 shadow-m shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setActiveHubTab('catalog')}
+                  className={`px-3 py-1 rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                    activeHubTab === 'catalog'
+                      ? 'bg-white text-slate-950 shadow-sm'
+                      : 'text-slate-500 hover:text-slate-900'
+                  }`}
+                >
+                  <Package className="w-3.5 h-3.5" />
+                  <span>View Catalog</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveHubTab('dashboard')}
+                  className={`px-3 py-1 rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                    activeHubTab === 'dashboard'
+                      ? 'bg-white text-slate-950 shadow-sm'
+                      : 'text-slate-500 hover:text-slate-900'
+                  }`}
+                >
+                  {currentUser.role === 'vendor' ? (
+                    <>
+                      <Building2 className="w-3.5 h-3.5" />
+                      <span>Merchant Hub</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sliders className="w-3.5 h-3.5" />
+                      <span>Admin Cockpit</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+            
+            {(!currentUser || currentUser.role === 'user' || activeHubTab === 'catalog') && (
               <button 
                 onClick={() => setIsCartOpen(true)}
-                className="relative bg-white hover:bg-slate-50 text-slate-700 hover:text-slate-950 border border-slate-200 px-4 py-1.5 rounded-xl flex items-center gap-2 transition cursor-pointer"
+                className="relative bg-white hover:bg-slate-50 text-slate-700 hover:text-slate-950 border border-slate-205 px-4 py-1.5 rounded-xl flex items-center gap-2 transition cursor-pointer"
                 id="desktop-cart-toggle"
               >
                 <ShoppingCart className="w-4 h-4 text-slate-900 shadow-sm" />
@@ -527,11 +616,12 @@ export default function App() {
 
       {/* --- DASHBOARD STAGE BY AUTHORIZED RBAC ROLES --- */}
 
-      {currentUser && currentUser.role === 'admin' ? (
-        
-        // ==========================================
-        // JOURNEY A: SUPERADMIN ADMIN OFFICE HUB
-        // ==========================================
+      {currentUser && (currentUser.role === 'admin' || currentUser.role === 'vendor') && activeHubTab === 'dashboard' ? (
+        currentUser.role === 'admin' ? (
+          
+          // ==========================================
+          // JOURNEY A: SUPERADMIN ADMIN OFFICE HUB
+          // ==========================================
         <main className="max-w-7xl mx-auto px-6 py-10 w-full space-y-8 flex-1 animate-in fade-in duration-200">
           
           {/* Header block with statistics indicator cards */}
@@ -691,8 +781,7 @@ export default function App() {
           </div>
 
         </main>
-
-      ) : currentUser && currentUser.role === 'vendor' ? (
+      ) : (
         
         // ==========================================
         // JOURNEY B: OUTSTANDING VENDOR CONTROL HUB
@@ -999,8 +1088,7 @@ export default function App() {
           </div>
 
         </main>
-
-      ) : (
+      )) : (
         
         // ==========================================
         // JOURNEY C: MAIN DISCOVERY & CLIENT WORKFLOWS
@@ -1266,14 +1354,16 @@ export default function App() {
       />
 
       {/* Dual portal dynamic authentication controls */}
-      <AuthModal 
-        isOpen={isAuthOpen}
-        onClose={() => setIsAuthOpen(false)}
-        onAuthSuccess={(profile) => {
-          setCurrentUser(profile);
-          setIsAuthOpen(false);
-        }}
-      />
+      {isAuthOpen && (
+        <AuthModal 
+          isOpen={isAuthOpen}
+          onClose={() => setIsAuthOpen(false)}
+          onAuthSuccess={(profile) => {
+            setCurrentUser(profile);
+            setIsAuthOpen(false);
+          }}
+        />
+      )}
 
     </div>
   );
