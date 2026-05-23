@@ -1,0 +1,6 @@
+{
+  "name": "Database Schema Designer",
+  "description": "An interactive database diagram visualizer and production-grade SQL schema generator for multi-vendor marketplaces.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
