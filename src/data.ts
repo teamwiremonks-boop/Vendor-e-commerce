@@ -1,5 +1,7 @@
 export interface B2BProduct {
   id: string;
+  variantId?: string;
+  storeId?: string;
   vendorId: string;
   vendorName: string;
   name: string;

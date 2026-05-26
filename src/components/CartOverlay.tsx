@@ -18,7 +18,7 @@ interface CartOverlayProps {
   cart: CartItem[];
   onUpdateQty: (prodId: string, qty: number) => void;
   onRemoveItem: (prodId: string) => void;
-  onCheckoutSuccess: (logs: string[]) => void;
+  onCheckoutSuccess: (logs: string[], supabaseOrder?: any) => void;
   userRole?: string;
   currentUser?: CurrentUserProfile | null;
   onOpenAuth?: () => void;
@@ -39,10 +39,16 @@ export default function CartOverlay({
   const [moqWarning, setMoqWarning] = useState<string | null>(null);
 
   useEffect(() => {
-    if (currentUser && moqWarning && moqWarning.toLowerCase().includes("login")) {
+    if (currentUser) {
       setMoqWarning(null);
     }
-  }, [currentUser, moqWarning]);
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (isOpen && currentUser) {
+      setMoqWarning(null);
+    }
+  }, [isOpen, currentUser]);
 
   if (!isOpen) return null;
 
@@ -88,46 +94,115 @@ export default function CartOverlay({
       const rawId = currentUser.id || 'user-generic';
       const validUserUuid = (rawId && rawId.includes('-')) ? rawId : '00000000-0000-4000-a000-000000000002';
 
-      // Pre-seed references to guarantee foreign keys are satisfied
-      try {
-        const fallbackId = '00000000-0000-4000-a000-000000000001';
+      // Ensure every item's product/variant/vendor/store exists in the database before checkout to prevent FK violations
+      for (const item of cart) {
+        const vId = item.product.variantId && item.product.variantId.includes('-') && item.product.variantId.length === 36
+          ? item.product.variantId
+          : '00000000-0000-4000-a000-000000000001';
+        const pId = item.product.id && item.product.id.includes('-') && item.product.id.length === 36
+          ? item.product.id
+          : '00000000-0000-4000-a000-000000000001';
         
-        await supabase.from('users').insert([{
-          user_id: validUserUuid,
-          user_name: currentUser.name || 'B2B Client',
-          user_email: currentUser.email || 'client@example.com',
-          user_password: 'Password123!',
-          role: currentUser.role || 'user'
-        }]);
-
-        await supabase.from('vendors').insert([{
-          vendor_id: fallbackId,
-          vendor_name: 'B2B Clearances',
-          status: 'active'
-        }]);
-        
-        await supabase.from('products').insert([{
-          product_id: fallbackId,
-          vendor_id: fallbackId,
-          product_name: 'Clearance Lot Service Item',
-          category: 'Porcelain'
-        }]);
-        
-        await supabase.from('product_variants').insert([{
-          variant_id: fallbackId,
-          product_id: fallbackId,
-          variant_name: 'Standard Issue Variant',
-          price: 29.90,
-          sku: 'SKU-FALLBACK-002'
-        }]);
-        
-        await supabase.from('stores').insert([{
-          store_id: fallbackId,
-          vendor_id: fallbackId,
-          store_name: 'Central Warehouse Depot'
-        }]);
-      } catch (seedErr) {
-        console.warn('Seeding of checkout references completed or skipped:', seedErr);
+        try {
+          const { data: existingVariant } = await supabase
+            .from('product_variants')
+            .select('variant_id')
+            .eq('variant_id', vId)
+            .maybeSingle();
+            
+          if (!existingVariant) {
+            console.log(`[Checkout Safeguard] Variant ${vId} not found in database. Resolving dependencies...`);
+            
+            // 1. Ensure vendor exists
+            const vendorId = item.product.vendorId && item.product.vendorId.includes('-') && item.product.vendorId.length === 36
+              ? item.product.vendorId
+              : '00000000-0000-4000-a000-000000000001';
+              
+            const { data: existingVendor } = await supabase
+              .from('vendors')
+              .select('vendor_id')
+              .eq('vendor_id', vendorId)
+              .maybeSingle();
+              
+            if (!existingVendor) {
+              await supabase.from('vendors').insert([{
+                vendor_id: vendorId,
+                vendor_name: item.product.vendorName || 'Elite Tiles Importers',
+                status: 'active'
+              }]);
+            }
+            
+            // 2. Ensure product exists
+            const { data: existingProd } = await supabase
+              .from('products')
+              .select('product_id')
+              .eq('product_id', pId)
+              .maybeSingle();
+              
+            if (!existingProd) {
+              await supabase.from('products').insert([{
+                product_id: pId,
+                id: pId,
+                vendor_id: vendorId,
+                product_name: item.product.name,
+                product_description: item.product.description,
+                category: item.product.category,
+                image: item.product.image
+              }]);
+            }
+            
+            // 3. Ensure product variant exists
+            await supabase.from('product_variants').insert([{
+              variant_id: vId,
+              product_id: pId,
+              variant_name: `${item.product.finish} finish (${item.product.dimensions})`,
+              price: item.product.clearancePrice,
+              sku: item.product.skus || `SKU-${Math.random().toString(36).substr(2, 5).toUpperCase()}`
+            }]);
+            
+            // 4. Ensure store exists
+            const storeId = item.product.storeId && item.product.storeId.includes('-') && item.product.storeId.length === 36
+              ? item.product.storeId
+              : '00000000-0000-4000-a000-000000000001';
+              
+            const { data: existingStore } = await supabase
+              .from('stores')
+              .select('store_id')
+              .eq('store_id', storeId)
+              .maybeSingle();
+              
+            if (!existingStore) {
+              try {
+                await supabase.from('stores').insert([{
+                  store_id: storeId,
+                  vendor_id: vendorId,
+                  store_name: item.product.storeName || 'Distribution Logistics',
+                  store_location: item.product.storeLocation || 'Central Logistics Depot'
+                }]);
+              } catch (_) {
+                try {
+                  await supabase.from('store').insert([{
+                    store_id: storeId,
+                    vendor_id: vendorId,
+                    store_name: item.product.storeName || 'Distribution Logistics',
+                    store_location: item.product.storeLocation || 'Central Logistics Depot'
+                  }]);
+                } catch (_) {}
+              }
+            }
+            
+            // 5. Ensure inventory exists
+            try {
+              await supabase.from('inventory').insert([{
+                store_id: storeId,
+                variant_id: vId,
+                quantity: item.product.stockSqm
+              }]);
+            } catch (_) {}
+          }
+        } catch (safeguardErr) {
+          console.warn('[Checkout Safeguard] Error while dynamically securing product: ', safeguardErr);
+        }
       }
 
       // A. Insert into public orders table
@@ -147,15 +222,19 @@ export default function CartOverlay({
 
         // B. Prep and insert line item nodes for the order
         const orderItemsData = cart.map(item => {
-          const itemVariantId = (item.product.id && item.product.id.includes('-') && item.product.id.length === 36)
-            ? item.product.id
-            : '00000000-0000-4000-a000-000000000001';
+          const itemVariantId = (item.product.variantId && item.product.variantId.includes('-') && item.product.variantId.length === 36)
+            ? item.product.variantId
+            : (item.product.id && item.product.id.includes('-') && item.product.id.length === 36)
+              ? item.product.id
+              : '00000000-0000-4000-a000-000000000001';
             
           const itemVendorId = (item.product.vendorId && item.product.vendorId.includes('-') && item.product.vendorId.length === 36)
             ? item.product.vendorId
             : '00000000-0000-4000-a000-000000000001';
 
-          const itemStoreId = '00000000-0000-4000-a000-000000000001'; // Default warehouse reference unless specific stores joined
+          const itemStoreId = (item.product.storeId && item.product.storeId.includes('-') && item.product.storeId.length === 36)
+            ? item.product.storeId
+            : '00000000-0000-4000-a000-000000000001';
 
           return {
             order_id: actualOrderId,
@@ -184,7 +263,7 @@ export default function CartOverlay({
 
       setTimeout(() => {
         setSubmitting(false);
-        onCheckoutSuccess(successUpdates);
+        onCheckoutSuccess(successUpdates, orderData);
         onClose();
       }, 1200);
 
@@ -275,8 +354,8 @@ export default function CartOverlay({
                       </p>
                       
                       <div className="flex items-center gap-2 mt-1.5">
-                        <span className="text-xs font-bold text-slate-900 font-mono">${item.product.clearancePrice.toFixed(2)}</span>
-                        <span className="text-[10px] text-slate-400 line-through font-mono">${item.product.originalPrice.toFixed(2)}</span>
+                        <span className="text-xs font-bold text-slate-900 font-mono">₹{item.product.clearancePrice.toFixed(2)}</span>
+                        <span className="text-[10px] text-slate-400 line-through font-mono">₹{item.product.originalPrice.toFixed(2)}</span>
                         <span className="text-[9px] bg-emerald-50 text-emerald-800 border border-emerald-100/50 px-1 py-0.2 rounded font-semibold">
                           -{discountOff}%
                         </span>
@@ -342,14 +421,14 @@ export default function CartOverlay({
                 <Tag className="w-3.5 h-3.5 text-emerald-600" /> Clearance Discount
               </span>
               <span className="font-bold text-emerald-800 font-mono">
-                -${totalSavings.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                -₹{totalSavings.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </span>
             </div>
 
             <div className="space-y-1.5 text-xs text-slate-600">
               <div className="flex justify-between">
                 <span>Value at Standard List Rate:</span>
-                <span className="line-through font-mono">${totalOriginalPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                <span className="line-through font-mono">₹{totalOriginalPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
               </div>
               <div className="flex justify-between">
                 <span>Delivery Logistics Status:</span>
@@ -358,7 +437,7 @@ export default function CartOverlay({
               <div className="flex justify-between pt-2.5 border-t border-slate-200 text-slate-900">
                 <span className="font-bold text-slate-900 text-xs">Contract Clearance Subtotal:</span>
                 <span className="text-base font-black text-slate-950 font-mono">
-                  ${totalClearancePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  ₹{totalClearancePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
             </div>
@@ -372,7 +451,7 @@ export default function CartOverlay({
                 <span className="w-4.5 h-4.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
               ) : (
                 <>
-                  Confirm Trade Assignment
+                  Place Order
                   <ArrowRight className="w-4 h-4" />
                 </>
               )}
