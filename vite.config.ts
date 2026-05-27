@@ -9,7 +9,7 @@ export default defineConfig(() => {
     base: '/Vendor-e-commerce/',
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(__dirname, './src'),
       },
     },
     define: {
